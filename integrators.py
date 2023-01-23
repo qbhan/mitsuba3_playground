@@ -22,7 +22,9 @@ def mis_weight(pdf_a, pdf_b):
 
 class Simple(mi.SamplingIntegrator):
     '''
-    Simple Path Tracer
+    Simple Path Tracer with
+    1. BSDF Sampling
+    2. Simple Russian Roulette
     '''
     def __init__(self, props=mi.Properties()):
         super().__init__(props)
@@ -39,41 +41,55 @@ class Simple(mi.SamplingIntegrator):
 
         prev_si = dr.zeros(mi.SurfaceInteraction3f)
 
+
+        # --------------------- Configure loop state ----------------------
+
         loop = mi.Loop(name="Path Tracing", state=lambda: (
             sampler, ray, depth, f, L, active, prev_si))
 
         loop.set_max_iterations(self.max_depth)
 
+
+        # -------------------------- Start Loop ----------------------------
+
         while loop(active):
+
+
+            # ------ Compute detailed record of the current intersection ------
+
             si: mi.SurfaceInteraction3f = scene.ray_intersect(
                 ray, ray_flags=mi.RayFlags.All, coherent=dr.eq(depth, 0))
 
-            bsdf: mi.BSDF = si.bsdf(ray)
-
-            # Direct emission
+            
+            # ---------------------- Direct emission ----------------------
 
             ds = mi.DirectionSample3f(scene, si=si, ref=prev_si)
-
             Le = f * ds.emitter.eval(si)
 
-            active_next = (depth + 1 < self.max_depth) & si.is_valid()
 
-            # BSDF Sampling
+           # ------------------------- BSDF sampling -------------------------
+
+            # Should we continue tracing to reach one more vertex?
+            active_next = (depth + 1 < self.max_depth) & si.is_valid()
+            bsdf: mi.BSDF = si.bsdf(ray)
+
+            # BSDF sampling
             bsdf_smaple, bsdf_val = bsdf.sample(
                 bsdf_ctx, si, sampler.next_1d(), sampler.next_2d(), active_next)
 
             # Update loop variables
-
             ray = si.spawn_ray(si.to_world(bsdf_smaple.wo))
             L = (L + Le)
             f *= bsdf_val
 
             prev_si = dr.detach(si, True)
 
-            # Stopping criterion (russian roulettte)
+            # ------------ Stopping criterion (Russian Roulette) ------------
 
+            # Don't run another iteration if the throughput has reached zero
             active_next &= dr.neq(dr.max(f), 0)
 
+            # Simple Russian roulette stopping probability
             rr_prop = dr.maximum(f.x, dr.maximum(f.y, f.z))
             rr_prop[depth < self.rr_depth] = 1.
             f *= dr.rcp(rr_prop)
@@ -105,7 +121,7 @@ class MyPathIntegrator(mi.SamplingIntegrator):
         ray = mi.Ray3f(ray_)
         prev_si = dr.zeros(mi.SurfaceInteraction3f)
 
-        depth = mi.UInt32(0)                          # Depth of current vertex
+        depth = mi.UInt32(0)                            # Depth of current vertex
         L = mi.Spectrum(0.0)                            # Radiance accumulator
         β = mi.Spectrum(1.0)                            # Path throughput weight
         η = mi.Float(1)                                 # Index of refraction
@@ -124,8 +140,7 @@ class MyPathIntegrator(mi.SamplingIntegrator):
             si: mi.SurfaceInteraction3f = scene.ray_intersect(
                 ray, ray_flags=mi.RayFlags.All, coherent=dr.eq(depth, 0))
 
-            
-
+    
             # ---------------------- Direct emission ----------------------
 
             ds = mi.DirectionSample3f(scene, si=si, ref=prev_si)
@@ -171,7 +186,7 @@ class MyPathIntegrator(mi.SamplingIntegrator):
             prev_si = dr.detach(si, True)
 
 
-            # -------------------- Stopping criterion ---------------------
+            # ------------ Stopping criterion (Russian Roulette) ------------
 
             # Don't run another iteration if the throughput has reached zero
             β_max = dr.max(β)
