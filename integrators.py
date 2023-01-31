@@ -268,7 +268,7 @@ class MyPathAOVIntegrator(mi.SamplingIntegrator):
         # add zeros for albedo, normal, and depth
         # aov = [mi.Normal3f(0.0)]
         # self.aovs = [mi.Normal3f(0.0)]
-        self.aovs = ['n.x', 'n.y', 'n.z']
+        self.aovs = ['n.x', 'n.y', 'n.z', 'd', 'a.r', 'a.g', 'a.b']
         # self.aovs = []
         return self.aovs
 
@@ -320,12 +320,11 @@ class MyPathAOVIntegrator(mi.SamplingIntegrator):
                 block.put(pos, aovs)
                 del aovs
             else:
-                print('get aovs')
-                # block.put(pos, ray.wavelengths, L * weight, alpha)
-                print(ray.wavelengths)
                 rgb = L * weight
-                block.put(pos, [rgb[0], rgb[1], rgb[2], mi.Float(1.0), aovs[0], aovs[1], aovs[2]])
-                print('got aovs')
+                block_input = [rgb[0], rgb[1], rgb[2], mi.Float(1.0)] + aovs
+                print(len(block_input))
+                # block.put(pos, [rgb[0], rgb[1], rgb[2], mi.Float(1.0), aovs[0], aovs[1], aovs[2], aovs[3]])
+                block.put(pos, block_input)
 
             # Explicitly delete any remaining unused variables
             del sampler, ray, weight, pos, L, valid, alpha
@@ -546,7 +545,8 @@ class MyPathAOVIntegrator(mi.SamplingIntegrator):
         active = mi.Bool(active)                        # Active SIMD lanes
         
         # aov = self.aov()
-        aov = [mi.Float(0.0), mi.Float(0.0), mi.Float(0.0)]
+        # aov = [mi.Float(0.0), mi.Float(0.0), mi.Float(0.0)]
+        aov = [mi.Float(0.0) for i in range(len(self.aovs))]
         first = mi.UInt32(0)
 
         loop = mi.Loop(name="Path Tracing", state=lambda: (
@@ -562,11 +562,10 @@ class MyPathAOVIntegrator(mi.SamplingIntegrator):
             si: mi.SurfaceInteraction3f = scene.ray_intersect(
                 ray, ray_flags=mi.RayFlags.All, coherent=dr.eq(depth, 0))
 
-            aov[0] += dr.select(dr.eq(depth, 0), si.sh_frame.n.x, mi.Float(0.0))
-            aov[1] += dr.select(dr.eq(depth, 0), si.sh_frame.n.y, mi.Float(0.0))
-            aov[2] += dr.select(dr.eq(depth, 0), si.sh_frame.n.z, mi.Float(0.0))
-
-
+            aov[0] += dr.select(dr.eq(depth, 0) & si.is_valid(), si.sh_frame.n.x, mi.Float(0.0))
+            aov[1] += dr.select(dr.eq(depth, 0) & si.is_valid(), si.sh_frame.n.y, mi.Float(0.0))
+            aov[2] += dr.select(dr.eq(depth, 0) & si.is_valid(), si.sh_frame.n.z, mi.Float(0.0))
+            aov[3] += dr.select(dr.eq(depth, 0) & si.is_valid(), si.t, mi.Float(0.0))
     
             # ---------------------- Direct emission ----------------------
 
@@ -580,7 +579,12 @@ class MyPathAOVIntegrator(mi.SamplingIntegrator):
 
             # Get the BSDF
             bsdf: mi.BSDF = si.bsdf(ray)
-            # aov[2] += bsdf.eval_diffuse_reflectance(si, active)
+
+            # save albedo of first bounce
+            albedo = bsdf.eval_diffuse_reflectance(si, active)
+            aov[4] += dr.select(dr.eq(depth, 0) & si.is_valid(), albedo[0], mi.Float(0.0))
+            aov[5] += dr.select(dr.eq(depth, 0) & si.is_valid(), albedo[1], mi.Float(0.0))
+            aov[6] += dr.select(dr.eq(depth, 0) & si.is_valid(), albedo[2], mi.Float(0.0))
 
             # Is emitter sampling even possible on the current vertex?
             active_em = active_next & mi.has_flag(bsdf.flags(), mi.BSDFFlags.Smooth)
@@ -699,14 +703,17 @@ if __name__ == "__main__":
     image = mi.render(scene, spp=64, integrator=my_path)
     print(image.shape, type(image))
     np_image = np.array(image)
+    end = time.time()
     print(np_image.shape, type(np_image))
     # mi.util.write_bitmap("my_first_render.png", np_image)
     # mi.util.write_bitmap("my_first_render_normal.png", np_image[3:])
 
     import matplotlib.pyplot as plt
-    rgb, normal = np_image[:, :, :3], np_image[:, :, 3:]
-    plt.imsave("my_first_render_1.png", tonemap(rgb))
+    rgb, normal, depth, albedo = np_image[:, :, :3], np_image[:, :, 3:6], np_image[:, :, 6], np_image[:, :, 7:]
+    plt.imsave("rgb.png", tonemap(rgb))
     normal = np.clip(normal * 0.5 + 0.5, 0.0, 1.0)
-    plt.imsave("my_first_render_normal_1.png", normal)
-    end = time.time()
+    plt.imsave("normal.png", normal)
+    print(np.max(depth))
+    plt.imsave("depth.png", depth, cmap='gray', vmin=np.min(depth), vmax=np.max(depth))
+    plt.imsave('albedo.png', albedo)
     print('rendering time:', end-start)
