@@ -257,19 +257,22 @@ class MyPathAOVIntegrator(mi.SamplingIntegrator):
         super().__init__(props)
         self.max_depth = props.get("max_depth")
         self.rr_depth = props.get("rr_depth")
-
-
-    def aov_names(self):
-        return ['.x', '.y', '.z']
-        # return [mi.Float(0.0), mi.Float(0.0), mi.Float(0.0)]
+        self.aov_list = props.get("aovs").split(',')
+        self.aov_support = ['normal:3', 'depth:1', 'albedo:3']
         
-    def aovs(self):
 
-        # add zeros for albedo, normal, and depth
-        # aov = [mi.Normal3f(0.0)]
-        # self.aovs = [mi.Normal3f(0.0)]
-        self.aovs = ['n.x', 'n.y', 'n.z', 'd', 'a.r', 'a.g', 'a.b']
-        # self.aovs = []
+    def aovs(self):
+        # parse aov_list and check all aovs are supported
+        self.aovs = []
+        for aov in self.aov_list:
+            if aov not in self.aov_support:
+                assert NotImplementedError('AOV {} is currently not supported'.format(aov))
+            aov_name, aov_ch = aov.split(':')[0], aov.split(':')[1]
+            for i in range(int(aov_ch)):
+                self.aovs.append(aov_name + '.{}'.format(str(i+1)))
+
+        # self.aovs = ['n.x', 'n.y', 'n.z', 'd', 'a.r', 'a.g', 'a.b']
+        print(self.aovs)
         return self.aovs
 
 
@@ -294,10 +297,8 @@ class MyPathAOVIntegrator(mi.SamplingIntegrator):
                 spp=spp,
                 aovs=self.aovs()
             )
-            # print('prepare done')
             # Generate a set of rays starting at the sensor
             ray, weight, pos, _ = self.sample_rays(scene, sensor, sampler)
-            # print('sample rays done')
             # Launch the Monte Carlo sampling process in primal mode
             L, valid, aovs = self.sample(
                 scene=scene,
@@ -322,15 +323,12 @@ class MyPathAOVIntegrator(mi.SamplingIntegrator):
             else:
                 rgb = L * weight
                 block_input = [rgb[0], rgb[1], rgb[2], mi.Float(1.0)] + aovs
-                print(len(block_input))
-                # block.put(pos, [rgb[0], rgb[1], rgb[2], mi.Float(1.0), aovs[0], aovs[1], aovs[2], aovs[3]])
                 block.put(pos, block_input)
 
             # Explicitly delete any remaining unused variables
             del sampler, ray, weight, pos, L, valid, alpha
             gc.collect()
 
-            print('here?')
             # Perform the weight division and return an image tensor
             sensor.film().put_block(block)
             self.primal_image = sensor.film().develop()
@@ -695,13 +693,17 @@ if __name__ == "__main__":
     my_path = mi.load_dict({
         'type': 'MyPathAOV',
         'max_depth': 6,
-        'rr_depth': 5
+        'rr_depth': 5,
+        'aovs': ','.join([
+                                'normal:3',
+                                'depth:1',
+                                'albedo:3'
+                            ])
     })
     scene = mi.load_file("bathroom/scene.xml")
     import time
     start = time.time()
     image = mi.render(scene, spp=64, integrator=my_path)
-    print(image.shape, type(image))
     np_image = np.array(image)
     end = time.time()
     print(np_image.shape, type(np_image))
@@ -713,7 +715,6 @@ if __name__ == "__main__":
     plt.imsave("rgb.png", tonemap(rgb))
     normal = np.clip(normal * 0.5 + 0.5, 0.0, 1.0)
     plt.imsave("normal.png", normal)
-    print(np.max(depth))
     plt.imsave("depth.png", depth, cmap='gray', vmin=np.min(depth), vmax=np.max(depth))
     plt.imsave('albedo.png', albedo)
     print('rendering time:', end-start)
