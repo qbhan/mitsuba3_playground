@@ -258,21 +258,25 @@ class MyPathAOVIntegrator(mi.SamplingIntegrator):
         self.max_depth = props.get("max_depth")
         self.rr_depth = props.get("rr_depth")
         self.aov_list = props.get("aovs").split(',')
-        self.aov_support = ['normal:3', 'depth:1', 'albedo:3']
+        self.aov_support = [
+                            'normal:3', 'depth:1', 'albedo:3',
+                            'normal_diff:3', 'depth_diff:3', 'albedo_diff:3',
+                            'radiance_diff:3'
+                            ]
         
 
     def aovs(self):
         # parse aov_list and check all aovs are supported
-        self.aovs = []
+        self.aov = []
         for aov in self.aov_list:
-            if aov not in self.aov_support:
-                assert NotImplementedError('AOV {} is currently not supported'.format(aov))
+            # if aov not in self.aov_support:
+            #     assert NotImplementedError('AOV {} is currently not supported'.format(aov))
             aov_name, aov_ch = aov.split(':')[0], aov.split(':')[1]
             for i in range(int(aov_ch)):
-                self.aovs.append(aov_name + '.{}'.format(str(i+1)))
+                self.aov.append(aov_name + '.{}'.format(str(i+1)))
 
-        print(self.aovs)
-        return self.aovs
+        print(self.aov)
+        return self.aov
 
 
     def render(self: mi.SamplingIntegrator,
@@ -323,6 +327,8 @@ class MyPathAOVIntegrator(mi.SamplingIntegrator):
                 rgb = L * weight
                 block_input = [rgb[0], rgb[1], rgb[2], mi.Float(1.0)] + aovs
                 block.put(pos, block_input)
+                # a = block.tensor()
+                # print(a.shape)
 
             # Explicitly delete any remaining unused variables
             del sampler, ray, weight, pos, L, valid, alpha
@@ -541,12 +547,13 @@ class MyPathAOVIntegrator(mi.SamplingIntegrator):
         mis_em = mi.Float(1)                            # Emitter MIS weight
         active = mi.Bool(active)                        # Active SIMD lanes
         
-        aov = [mi.Float(0.0) for i in range(len(self.aovs))]
+        aov = [mi.Float(0.0) for i in range(len(self.aov))]
         first_non_specular = mi.Bool(False)
         depth_diff = mi.Float(0.0)
+        β_diff = mi.Spectrum(1.0)
 
         loop = mi.Loop(name="Path Tracing", state=lambda: (
-            sampler, ray, prev_si, depth, L, β, η, mis_em, active, aov, first_non_specular, depth_diff))
+            sampler, ray, prev_si, depth, L, β, η, mis_em, active, aov, first_non_specular, depth_diff, β_diff))
 
         loop.set_max_iterations(self.max_depth)
 
@@ -591,6 +598,7 @@ class MyPathAOVIntegrator(mi.SamplingIntegrator):
                                                             wo, active_em)
             mis_direct = dr.select(ds.delta, 1, mis_weight(ds.pdf, bsdf_pdf_em))
             Lr_dir = β * mis_direct * bsdf_value_em * em_weight
+            Lr_dir_diff = β_diff * mis_direct * bsdf_value_em * em_weight
 
 
             # ------------------------- BSDF sampling -------------------------
@@ -606,6 +614,8 @@ class MyPathAOVIntegrator(mi.SamplingIntegrator):
             η     *= bsdf_sample.eta
             β     *= bsdf_val
             L = L + Le + Lr_dir
+            # β_diff *= dr.select(dr.eq(first_non_specular, False), dr.select(dr.eq(found_specular, True), mi.Color3f(0.0), bsdf.eval_diffuse_reflectance(si, active)) , bsdf_val)
+            β_diff *= dr.select(dr.eq(found_specular, True), bsdf_val, bsdf.eval_diffuse_reflectance(si, active))
 
             prev_si = dr.detach(si, True)
 
@@ -613,28 +623,35 @@ class MyPathAOVIntegrator(mi.SamplingIntegrator):
 
             # record normal, depth, and albedo of first bounce
             if 'normal:3' in self.aov_list:
-                aov[self.aovs.index('normal.1')] += dr.select(('normal.1' in self.aovs) & dr.eq(depth, 0) & si.is_valid(), si.sh_frame.n.x, mi.Float(0.0))
-                aov[self.aovs.index('normal.2')] += dr.select(('normal.2' in self.aovs) & dr.eq(depth, 0) & si.is_valid(), si.sh_frame.n.y, mi.Float(0.0))
-                aov[self.aovs.index('normal.3')] += dr.select(('normal.3' in self.aovs) & dr.eq(depth, 0) & si.is_valid(), si.sh_frame.n.z, mi.Float(0.0))
+                aov[self.aov.index('normal.1')] += dr.select(('normal.1' in self.aov) & dr.eq(depth, 0) & si.is_valid(), si.sh_frame.n.x, mi.Float(0.0))
+                aov[self.aov.index('normal.2')] += dr.select(('normal.2' in self.aov) & dr.eq(depth, 0) & si.is_valid(), si.sh_frame.n.y, mi.Float(0.0))
+                aov[self.aov.index('normal.3')] += dr.select(('normal.3' in self.aov) & dr.eq(depth, 0) & si.is_valid(), si.sh_frame.n.z, mi.Float(0.0))
             if 'depth:1' in self.aov_list:
-                aov[self.aovs.index('depth.1')] += dr.select(('depth.1' in self.aovs) & dr.eq(depth, 0) & si.is_valid(), si.t, mi.Float(0.0))
+                aov[self.aov.index('depth.1')] += dr.select(('depth.1' in self.aov) & dr.eq(depth, 0) & si.is_valid(), si.t, mi.Float(0.0))
             albedo = bsdf.eval_diffuse_reflectance(si, active)
             if 'albedo:3' in self.aov_list:
-                aov[self.aovs.index('albedo.1')] += dr.select(('albedo.1' in self.aovs) & dr.eq(depth, 0) & si.is_valid(), albedo[0], mi.Float(0.0))
-                aov[self.aovs.index('albedo.2')] += dr.select(('albedo.2' in self.aovs) & dr.eq(depth, 0) & si.is_valid(), albedo[1], mi.Float(0.0))
-                aov[self.aovs.index('albedo.3')] += dr.select(('albedo.3' in self.aovs) & dr.eq(depth, 0) & si.is_valid(), albedo[2], mi.Float(0.0))
+                aov[self.aov.index('albedo.1')] += dr.select(('albedo.1' in self.aov) & dr.eq(depth, 0) & si.is_valid(), albedo[0], mi.Float(0.0))
+                aov[self.aov.index('albedo.2')] += dr.select(('albedo.2' in self.aov) & dr.eq(depth, 0) & si.is_valid(), albedo[1], mi.Float(0.0))
+                aov[self.aov.index('albedo.3')] += dr.select(('albedo.3' in self.aov) & dr.eq(depth, 0) & si.is_valid(), albedo[2], mi.Float(0.0))
 
             # record normal, depth, and albedo of first non-specular bounce
             if 'normal_diff:3' in self.aov_list:
-                aov[self.aovs.index('normal_diff.1')] += dr.select(('normal_diff.1' in self.aovs) & dr.eq(first_non_specular, False) & dr.eq(found_specular, False) & si.is_valid(), si.sh_frame.n.x, mi.Float(0.0))
-                aov[self.aovs.index('normal_diff.2')] += dr.select(dr.eq(('normal_diff.2' in self.aovs) & first_non_specular, False) & dr.eq(found_specular, False) & si.is_valid(), si.sh_frame.n.y, mi.Float(0.0))
-                aov[self.aovs.index('normal_diff.3')] += dr.select(dr.eq(('normal_diff.3' in self.aovs) & first_non_specular, False) & dr.eq(found_specular, False) & si.is_valid(), si.sh_frame.n.z, mi.Float(0.0))
+                aov[self.aov.index('normal_diff.1')] += dr.select(('normal_diff.1' in self.aov) & dr.eq(first_non_specular, False) & dr.eq(found_specular, False) & si.is_valid(), si.sh_frame.n.x, mi.Float(0.0))
+                aov[self.aov.index('normal_diff.2')] += dr.select(dr.eq(('normal_diff.2' in self.aov) & first_non_specular, False) & dr.eq(found_specular, False) & si.is_valid(), si.sh_frame.n.y, mi.Float(0.0))
+                aov[self.aov.index('normal_diff.3')] += dr.select(dr.eq(('normal_diff.3' in self.aov) & first_non_specular, False) & dr.eq(found_specular, False) & si.is_valid(), si.sh_frame.n.z, mi.Float(0.0))
             if 'depth_diff:1' in self.aov_list:
-                aov[self.aovs.index('depth_diff.1')] += dr.select(dr.eq(('depth_diff.1' in self.aovs) & first_non_specular, False) & dr.eq(found_specular, False) & si.is_valid(), depth_diff, mi.Float(0.0))
+                aov[self.aov.index('depth_diff.1')] += dr.select(dr.eq(('depth_diff.1' in self.aov) & first_non_specular, False) & dr.eq(found_specular, False) & si.is_valid(), depth_diff, mi.Float(0.0))
             if 'albedo_diff:3' in self.aov_list:
-                aov[self.aovs.index('albedo_diff.1')] += dr.select(('albedo_diff.1' in self.aovs) & dr.eq(first_non_specular, False) & dr.eq(found_specular, False) & si.is_valid(), albedo[0], mi.Float(0.0))
-                aov[self.aovs.index('albedo_diff.2')] += dr.select(('albedo_diff.2' in self.aovs) & dr.eq(first_non_specular, False) & dr.eq(found_specular, False) & si.is_valid(), albedo[1], mi.Float(0.0))
-                aov[self.aovs.index('albedo_diff.3')] += dr.select(('albedo_diff.3' in self.aovs) & dr.eq(first_non_specular, False) & dr.eq(found_specular, False) & si.is_valid(), albedo[2], mi.Float(0.0))
+                aov[self.aov.index('albedo_diff.1')] += dr.select(('albedo_diff.1' in self.aov) & dr.eq(first_non_specular, False) & dr.eq(found_specular, False) & si.is_valid(), albedo[0], mi.Float(0.0))
+                aov[self.aov.index('albedo_diff.2')] += dr.select(('albedo_diff.2' in self.aov) & dr.eq(first_non_specular, False) & dr.eq(found_specular, False) & si.is_valid(), albedo[1], mi.Float(0.0))
+                aov[self.aov.index('albedo_diff.3')] += dr.select(('albedo_diff.3' in self.aov) & dr.eq(first_non_specular, False) & dr.eq(found_specular, False) & si.is_valid(), albedo[2], mi.Float(0.0))
+
+            # record diffuse radiance
+            if 'radiance_diff:3' in self.aov_list:
+                L_diff = Lr_dir_diff
+                aov[self.aov.index('radiance_diff.1')] += L_diff[0] 
+                aov[self.aov.index('radiance_diff.2')] += L_diff[1] 
+                aov[self.aov.index('radiance_diff.3')] += L_diff[2] 
 
             # toggle it off
             first_non_specular = dr.select(dr.eq(first_non_specular, False) & dr.eq(found_specular, True), False, True)
@@ -689,6 +706,9 @@ class MyPathAOVIntegrator(mi.SamplingIntegrator):
 
 
 if __name__ == "__main__":
+    import os
+    from utils import save_aovs
+    import matplotlib.pyplot as plt
     # mi.set_log_level(mi.LogLevel.Info)
     mi.register_integrator("MyPathAOV", lambda props: MyPathAOVIntegrator(props))
     mi.register_integrator("MyPath", lambda props: MyPathIntegrator(props))
@@ -701,31 +721,51 @@ if __name__ == "__main__":
         'albedo:3',
         'normal_diff:3',
         'depth_diff:1',
-        'albedo_diff:3'
+        'albedo_diff:3',
+        'radiance_diff:3'
     ]
 
-    my_path = mi.load_dict({
+    my_aov = mi.load_dict({
         'type': 'MyPathAOV',
         'max_depth': 6,
         'rr_depth': 5,
         'aovs': ','.join(aovs)
     })
-    scene = mi.load_file("bathroom/scene.xml")
+
+    my_path = mi.load_dict({
+        'type': 'MyPath',
+        'max_depth': 6,
+        'rr_depth': 5
+    })
+    
+    # for scene_name in os.listdir('scenes/'):
+        
+    #     scene =  mi.load_file(os.path.join('scenes', scene_name, 'scene.xml'))
+    #     import time
+    #     start = time.time()
+    #     image = mi.render(scene, spp=8, integrator=my_aov)
+    #     np_image = np.array(image)
+    #     end = time.time()
+    #     save_aovs(np_image, aovs, save_dir=os.path.join('results', scene_name))
+    #     print(scene_name, 'noisy rendering time:', end-start)
+
+    #     start = time.time()
+    #     image1 = mi.render(scene, spp=4000, integrator=my_path)
+    #     image2 = mi.render(scene, spp=4000, integrator=my_path)
+    #     image = image1 + image2
+    #     end = time.time()
+    #     mi.util.write_bitmap(os.path.join('results', scene_name, 'clean.png'), image)
+    #     print(scene_name, 'clean rendering time:', end-start)
+
+    scene = mi.load_file(os.path.join('scenes', 'bathroom', 'scene.xml'))
+    # params = mi.traverse(scene)
+    # for key in params:
+    #     if 'light' in str(key).lower():
+    #         print(key)
     import time
     start = time.time()
-    image = mi.render(scene, spp=64, integrator=my_path)
+    image = mi.render(scene, spp=8, integrator=my_aov)
     np_image = np.array(image)
     end = time.time()
-    if np_image.shape[-1] == 3:
-        mi.util.write_bitmap("my_first_render.png", np_image)
-    else:
-        from utils import tonemap, save_aovs
-        import matplotlib.pyplot as plt
-        # rgb, normal, depth, albedo = np_image[:, :, :3], np_image[:, :, 3:6], np_image[:, :, 6], np_image[:, :, 7:10]
-        # plt.imsave("rgb.png", tonemap(rgb))
-        # normal = np.clip(normal * 0.5 + 0.5, 0.0, 1.0)
-        # plt.imsave("result/normal.png", normal)
-        # plt.imsave("result/depth.png", depth, cmap='gray', vmin=np.min(depth), vmax=np.max(depth))
-        # plt.imsave('result/albedo.png', albedo)
-        save_aovs(np_image, aovs)
-    print('rendering time:', end-start)
+    save_aovs(np_image, aovs, save_dir=os.path.join('results', 'bathroom'))
+    print('bathroom', 'noisy rendering time:', end-start)
