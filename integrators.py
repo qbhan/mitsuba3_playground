@@ -290,8 +290,8 @@ class MyPathAOVIntegrator(mi.SamplingIntegrator):
             film_size = film.crop_size()
             wavefront_size = dr.prod(film_size) * spp
             original_wavefront_size = wavefront_size
-            if wavefront_size > 2**32:
-                while wavefront_size > 2**32:
+            if wavefront_size > 2**32-1:
+                while wavefront_size > 2**32-1:
                     wavefront_size = int(wavefront_size / 2)
                     passes *= 2
                     spp = int(spp / 2)
@@ -681,15 +681,28 @@ class MyPathSampleIntegrator(mi.SamplingIntegrator):
         super().__init__(props)
         self.max_depth = props.get("max_depth")
         self.rr_depth = props.get("rr_depth")
+        self.cam_T: mi.Transform4f = props.get("cam_t")
 
         # get list of aovs and parse them
-        self.aov_list = props.get("aovs").split(',')
+        aov_list = props.get("aovs").split(',')
+        # expand bounce features
+        self.aov_list = []
+        for aov in aov_list:
+            if not 'bounce' in aov: self.aov_list.append(aov)
+            else:
+                for i in range(max(self.rr_depth, self.max_depth)):
+                    aov_bounce = aov.replace('bounce', 'b'+str(i))
+                    self.aov_list.append(aov_bounce)
         print(self.aov_list)
 
         self.aov_support = [
                             'normal:3f', 'depth:1f', 'albedo:3f',
                             'normal_diff:3f', 'depth_diff:3f', 'albedo_diff:3f',
                             ]
+
+    def init_scene(self, scene: mi.Scene):
+        params = mi.traverse(scene)
+        self.cam_T = params['PerspectiveCamera.to_world']
 
 
     def render(self: mi.SamplingIntegrator,
@@ -703,6 +716,9 @@ class MyPathSampleIntegrator(mi.SamplingIntegrator):
 
         if isinstance(sensor, int):
             sensor = scene.sensors()[sensor]
+        
+        # get useful components from scene
+        self.init_scene(scene)
 
         # Disable derivatives in all of the following
         with dr.suspend_grad():
@@ -725,32 +741,29 @@ class MyPathSampleIntegrator(mi.SamplingIntegrator):
             )
 
             # Prepare an ImageBlock as specified by the film
-            block = sensor.film().create_block()
+            # block = sensor.film().create_block()
 
             # Only use the coalescing feature when rendering enough samples
-            block.set_coalesce(block.coalesce() and spp >= 4)
+            # block.set_coalesce(block.coalesce() and spp >= 4)
             # Accumulate into the image block
             alpha = dr.select(valid, mi.Float(1), mi.Float(0))
             full_dict = {}
             if mi.has_flag(sensor.film().flags(), mi.FilmFlags.Special):
-                aovs = sensor.film().prepare_sample(L * weight, ray.wavelengths,
-                                                    block.channel_count(), alpha=alpha)
-                block.put(pos, aovs)
-                del aovs
+                NotImplementedError('does not support spectral film')
             else:
-                radiance = L * weight
-                block_input = [radiance[0], radiance[1], radiance[2], mi.Float(1.0)]
-                block.put(pos, block_input)
-                radiance_diff = L_diff * weight
-                
-                # store all features as tensors
+                radiance = L * weight # final radiance
                 np_radiance = np.reshape(np.array(radiance), (self.res_H, self.res_W, spp, -1)) # H x W x spp x C
                 full_dict['radiance:3f'] = np_radiance
+
+                radiance_diff = L_diff * weight # diffuse radiance
                 np_radiance_diff = np.reshape(np.array(radiance_diff), (self.res_H, self.res_W, spp, -1))
                 full_dict['radiance_diff:3f'] = np_radiance_diff
+
+                np_sample_pos = np.reshape(np.array(pos), (self.res_H, self.res_W, spp, -1))
+                full_dict['subpixel:2f'] = np_sample_pos
+
                 for i in range(len(self.aov_list)):
                     np_feat = np.reshape(np.array(aovs[i]), (self.res_H, self.res_W, spp, -1))
-                    # print(np_feat.shape)
                     full_dict[self.aov_list[i]] = np_feat
                     
 
@@ -759,8 +772,8 @@ class MyPathSampleIntegrator(mi.SamplingIntegrator):
             gc.collect()
 
             # Perform the weight division and return an image tensor
-            sensor.film().put_block(block)
-            self.primal_image = sensor.film().develop()
+            # sensor.film().put_block(block)
+            # self.primal_image = sensor.film().develop()
 
             return full_dict
 
@@ -930,8 +943,12 @@ class MyPathSampleIntegrator(mi.SamplingIntegrator):
         
         aovs = []
         for i in range(len(self.aov_list)):
-            if '3f' in self.aov_list[i]: aovs.append(mi.Vector3f(0.0))
-            elif '1f' in self.aov_list[i]: aovs.append(mi.Vector1f(0.0))
+            if '1f' in self.aov_list[i]: aovs.append(mi.Vector1f(0.0))
+            elif '2f' in self.aov_list[i]: aovs.append(mi.Vector2f(0.0))
+            elif '3f' in self.aov_list[i]: aovs.append(mi.Vector3f(0.0))
+            elif '4f' in self.aov_list[i]: aovs.append(mi.Vector4f(0.0))
+
+        direction = mi.Vector2f(0.0)
 
         first_non_specular = mi.Bool(False)
         depth_diff = mi.Float(0.0)
@@ -952,7 +969,7 @@ class MyPathSampleIntegrator(mi.SamplingIntegrator):
                 ray, ray_flags=mi.RayFlags.All, coherent=dr.eq(depth, 0))
 
             # accumulate depth
-            depth_diff += dr.select(dr.eq(depth, 0) & si.is_valid(), si.t, mi.Float(0.0))
+            depth_diff += dr.select(si.is_valid(), si.t, mi.Float(0.0))
 
     
             # ---------------------- Direct emission ----------------------
@@ -1025,6 +1042,24 @@ class MyPathSampleIntegrator(mi.SamplingIntegrator):
                 aovs[self.aov_list.index('depth_diff:1f')] += dr.select(dr.eq(first_non_specular, False) & dr.eq(found_specular, False) & si.is_valid(), depth_diff, mi.Vector1f(0.0))
             if 'albedo_diff:3f' in self.aov_list:
                 aovs[self.aov_list.index('albedo_diff:3f')] += dr.select(dr.eq(first_non_specular, False) & dr.eq(found_specular, False) & si.is_valid(), albedo, mi.Vector3f(0.0))
+
+            # record visibility for first and second bounce
+            if 'visibility_b0:1f' in self.aov_list:
+                aovs[self.aov_list.index('visibility_b0:1f')] += dr.select(dr.eq(depth, 0) & si.is_valid(), mi.Vector1f(1.0), mi.Vector1f(0.0))
+            if 'visibility_b1:1f' in self.aov_list:
+                aovs[self.aov_list.index('visibility_b1:1f')] += dr.select(dr.eq(depth, 1) & si.is_valid(), mi.Vector1f(1.0), mi.Vector1f(0.0))
+
+            # record light direction of BSDF Sampling in spherical coordinates
+            # TODO is camera coordinate important in path-space? I think world-space will be more important
+            direction: mi.Vector3f = si.to_world(bsdf_sample.wo) # change local coordinate to world coordinate
+            cam_direction = self.cam_T.transform_affine(direction) # change world coordinate to camera coordinate
+            # suppose normalized
+            norm = dr.sqrt(cam_direction[0]*cam_direction[0] + cam_direction[1]*cam_direction[1])
+            sph_theta = dr.select(dr.neq(norm, 0.0) & si.is_valid(), dr.atan2(cam_direction[1], cam_direction[0]), mi.Float(0))
+            sph_phi = dr.select((dr.neq(norm, 0.0) | dr.neq(cam_direction[2], 0.0)) & si.is_valid(), dr.atan2(norm, cam_direction[2]), mi.Float(0.0))
+            for i in range(max(self.rr_depth, self.max_depth)):
+                aovs[self.aov_list.index('direction_b{}:2f'.format(str(i)))] += dr.select(dr.eq(depth, i),  mi.Vector2f(sph_theta, sph_phi), mi.Vector2f(0.0))                
+            
 
             # toggle it off
             first_non_specular = dr.select(dr.eq(first_non_specular, False) & dr.eq(found_specular, True), False, True)
@@ -1105,6 +1140,11 @@ if __name__ == "__main__":
         'normal_diff:3f',
         'depth_diff:1f',
         'albedo_diff:3f',
+        'visibility_b0:1f',
+        'visibility_b1:1f',
+        'direction_bounce:2f'
+        # 'probability_bounce:4f',
+        # 'material_bounce:1f',
     ]
 
     my_aov = mi.load_dict({
@@ -1114,28 +1154,29 @@ if __name__ == "__main__":
         'aovs': ','.join(aovs)
     })
 
-    my_path = mi.load_dict({
-        'type': 'MyPathAOV',
-        'max_depth': 6,
-        'rr_depth': 5
-    })
-    
+    # print(os.listdir('scenes/')) 
     # for scene_name in os.listdir('scenes/'):
-        
+    #     if os.path.exists(os.path.join('results', scene_name)): continue
+    #     print('rendering scene {}'.format(scene_name))
     #     scene =  mi.load_file(os.path.join('scenes', scene_name, 'scene.xml'))
     #     import time
     #     start = time.time()
-    #     image = mi.render(scene, spp=8192, integrator=my_path)
-    #     np_image = np.array(image)
+    #     full_dict = mi.render(scene, spp=8, integrator=my_aov)
     #     end = time.time()
-    #     save_aovs(np_image, aovs, save_dir=os.path.join('results', scene_name))
+    #     save_aovs(full_dict, aovs, save_dir=os.path.join('results', scene_name))
     #     print(scene_name, 'rendering time:', end-start)
 
-    scene = mi.load_file(os.path.join('scenes', 'bathroom', 'scene.xml'))
+    scene = mi.load_file(os.path.join('scenes', 'staircase2', 'scene.xml'))
+    params = mi.traverse(scene)
+    a = params['PerspectiveCamera.to_world']
+    my_path = mi.load_dict({
+        'type': 'MyPathAOV',
+        'max_depth': 6,
+        'rr_depth': 5,
+    })
     import time
     start = time.time()
-    full_dict = mi.render(scene, spp=8192, integrator=my_path)
-    # np_image = np.array(image)
+    full_dict = mi.render(scene, spp=4, integrator=my_aov)
     end = time.time()
     save_aovs(full_dict, aovs, save_dir=os.path.join('results2'))
     print('bathroom', 'noisy rendering time:', end-start)

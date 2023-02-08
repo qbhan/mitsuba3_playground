@@ -17,7 +17,7 @@ def tonemap(c, ref=None, kInvGamma=1.0/2.2):
 
 
 def save_aovs(aov_dict: dict, aovs, save_dir='result'):
-    os.makedirs(save_dir)
+    os.makedirs(save_dir, exist_ok=True)
     for k in aov_dict:
         # print(k, full_dict[k].shape)
         aov_name = k.split(':')[0]
@@ -27,8 +27,21 @@ def save_aovs(aov_dict: dict, aovs, save_dir='result'):
         if 'normal' in aov_name:
             plt.imsave(os.path.join(save_dir, '{}.png'.format(aov_name)), np.clip(a * 0.5 + 0.5, 0.0, 1.0))
         elif 'depth' in aov_name:
+            a = np.clip(a, a_min=0.0, a_max=a.max())
             plt.imsave(os.path.join(save_dir, '{}.png'.format(aov_name)), a[:, :, 0], vmin=np.min(a), vmax=np.max(a))
         elif 'albedo' in aov_name:
             plt.imsave(os.path.join(save_dir, '{}.png'.format(aov_name)), np.clip(a, 0.0, 1.0))
         elif 'radiance' in aov_name:
             plt.imsave(os.path.join(save_dir, '{}.png'.format(aov_name)), tonemap(a))
+        else:
+            if a.shape[-1] == 1: plt.imsave(os.path.join(save_dir, '{}.png'.format(aov_name)), a[:, :, 0], vmin=np.min(a), vmax=np.max(a))
+            elif a.shape[-1] == 3:
+                plt.imsave(os.path.join(save_dir, '{}_x.png'.format(aov_name)), a, vmin=np.min(a), vmax=np.max(a))
+            else:
+                INDEX = ['x', 'y', 'z', 'w']
+                for i in range(a.shape[-1]):
+                    plt.imsave(os.path.join(save_dir, '{}_{}.png'.format(aov_name, INDEX[i])), a[:, :, i], vmin=np.min(a), vmax=np.max(a))
+
+# def make_probmap(aov_dict: dict, clean_dict:dict, save_dir='result'):
+#     gt = tonemap(clean_dict['radiance:3f'])
+#     diffuse = aov_dict(aov_dict['radiance_diff:3f'])
